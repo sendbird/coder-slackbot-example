@@ -5,7 +5,7 @@ go 1.25.8
 require (
 	github.com/coder/coder/v2 v2.33.0-rc.1.0.20260410120923-76d89f59af42
 	github.com/google/uuid v1.6.0
-	github.com/slack-go/slack v0.21.0
+	github.com/slack-go/slack v0.23.1
 )
 
 require (
