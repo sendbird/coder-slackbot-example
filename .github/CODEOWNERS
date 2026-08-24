@@ -1,0 +1,4 @@
+# Default owners for everything in this repo.
+# Security-relevant example: changes to the enforced controls in main.go and
+# the review checklist in sendbird_override.md require Core Platform review.
+* @sendbird/team_core_platform
