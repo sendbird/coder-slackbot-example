@@ -201,17 +201,18 @@ func (b *bot) dynamicTools() []codersdk.DynamicTool {
 				if err != nil {
 					return codersdk.DynamicToolResponse{Content: fmt.Sprintf("slack error: %v", err), IsError: true}, nil
 				}
+				// Email and admin status are deliberately not exposed: user
+				// email is employee PII and must not enter LLM context
+				// (see sendbird_override.md).
 				return jsonResponse(struct {
 					ID       string `json:"id"`
 					Name     string `json:"name"`
 					RealName string `json:"real_name"`
-					Email    string `json:"email"`
 					IsBot    bool   `json:"is_bot"`
-					IsAdmin  bool   `json:"is_admin"`
 					TZ       string `json:"tz"`
 				}{
 					ID: user.ID, Name: user.Name, RealName: user.RealName,
-					Email: user.Profile.Email, IsBot: user.IsBot, IsAdmin: user.IsAdmin, TZ: user.TZ,
+					IsBot: user.IsBot, TZ: user.TZ,
 				})
 			},
 		),
@@ -243,6 +244,11 @@ type bot struct {
 	tools     []codersdk.DynamicTool
 	toolMap   map[string]codersdk.DynamicTool
 	userCache *userCache
+	// allowedUsers is a fail-closed caller allowlist; allowAll must be set
+	// explicitly to open the bot to every workspace member
+	// (see sendbird_override.md).
+	allowedUsers map[string]bool
+	allowAll     bool
 }
 
 type userCache struct {
@@ -324,12 +330,26 @@ func main() {
 	}
 	logger.Info("connected to Slack", "bot_user_id", auth.UserID, "team", auth.Team)
 
+	allowAll := os.Getenv("SLACK_ALLOW_ALL_USERS") == "true"
+	allowedUsers := make(map[string]bool)
+	for _, id := range strings.Split(os.Getenv("SLACK_ALLOWED_USER_IDS"), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			allowedUsers[id] = true
+		}
+	}
+	if !allowAll && len(allowedUsers) == 0 {
+		logger.Error("caller authorization not configured: set SLACK_ALLOWED_USER_IDS to a comma-separated list of Slack user IDs, or set SLACK_ALLOW_ALL_USERS=true to intentionally open the bot to all workspace members (see sendbird_override.md)")
+		os.Exit(1)
+	}
+
 	b := &bot{
-		logger:    logger,
-		slack:     api,
-		coder:     codersdk.NewExperimentalClient(base),
-		botUID:    auth.UserID,
-		userCache: newUserCache(5 * time.Minute),
+		logger:       logger,
+		slack:        api,
+		coder:        codersdk.NewExperimentalClient(base),
+		botUID:       auth.UserID,
+		userCache:    newUserCache(5 * time.Minute),
+		allowedUsers: allowedUsers,
+		allowAll:     allowAll,
 	}
 	b.tools = b.dynamicTools()
 	b.toolMap = make(map[string]codersdk.DynamicTool, len(b.tools))
@@ -369,6 +389,10 @@ func main() {
 }
 
 func (b *bot) handleMention(ctx context.Context, ev *slackevents.AppMentionEvent) {
+	if !b.allowAll && !b.allowedUsers[ev.User] {
+		b.logger.Warn("ignoring mention from unauthorized user", "user", ev.User, "channel", ev.Channel)
+		return
+	}
 	threadTs := ev.ThreadTimeStamp
 	if threadTs == "" {
 		threadTs = ev.TimeStamp
@@ -561,6 +585,10 @@ func (b *bot) watchChats(ctx context.Context) {
 					twg.Add(1)
 					go func(idx int, tc codersdk.ChatStreamToolCall) {
 						defer twg.Done()
+						if err := verifyToolCall(tc.ToolName, tc.Args, channel); err != nil {
+							results[idx] = codersdk.ToolResult{ToolCallID: tc.ToolCallID, Output: json.RawMessage(fmt.Sprintf("%q", err.Error())), IsError: true}
+							return
+						}
 						call := codersdk.DynamicToolCall{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName, Args: tc.Args}
 						dt, ok := b.toolMap[tc.ToolName]
 						if !ok {
@@ -648,6 +676,45 @@ func formatMessage(text string) (string, bool, int) {
 	}
 
 	return text, truncated, origLen
+}
+
+// Tool classification for channel pinning. Tools not listed in either map are
+// rejected outright, so a tool added later defaults to deny until it is
+// explicitly classified (see sendbird_override.md).
+var channelBoundTools = map[string]bool{
+	"slack_send_message":       true,
+	"slack_edit_message":       true,
+	"slack_react_to_message":   true,
+	"slack_get_thread_replies": true,
+	"slack_report_status":      true,
+}
+
+var channelFreeTools = map[string]bool{
+	"slack_get_user_info": true,
+}
+
+// verifyToolCall rejects tool calls that target a channel other than the one
+// this chat is pinned to (the channel the bot was mentioned in), so a
+// prompt-injected model cannot read from or write to arbitrary channels the
+// bot happens to be a member of. Pinning is channel-level only: threads within
+// the pinned channel are not restricted.
+func verifyToolCall(toolName, args, channel string) error {
+	if channelFreeTools[toolName] {
+		return nil
+	}
+	if !channelBoundTools[toolName] {
+		return fmt.Errorf("tool %s is not classified for channel pinning: add it to channelBoundTools or channelFreeTools before use", toolName)
+	}
+	var probe struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.Unmarshal([]byte(args), &probe); err != nil {
+		return fmt.Errorf("invalid tool args: %v", err)
+	}
+	if probe.Channel != channel {
+		return fmt.Errorf("channel %q not allowed: this chat is pinned to channel %s", probe.Channel, channel)
+	}
+	return nil
 }
 
 func jsonResponse(v any) (codersdk.DynamicToolResponse, error) {

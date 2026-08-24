@@ -12,10 +12,17 @@ oauth_config:
       - app_mentions:read
       - chat:write
       - reactions:write
+      # channels:history / groups:history are broad-read scopes. Keep them ONLY
+      # if the bot must read thread replies in channels it is invited to;
+      # decide per sendbird_override.md before requesting review.
       - channels:history
       - groups:history
       - users:read
-      - users:read.email
+      # users:read.email removed (Sendbird fork): user email is employee PII
+      # and the code no longer exposes it to the model.
+      # For DM-notification bots: drop the two history scopes above and use
+      # im:history + im:read instead (see sendbird_override.md §2.2).
+      - assistant:write
 settings:
   event_subscriptions:
     bot_events:
