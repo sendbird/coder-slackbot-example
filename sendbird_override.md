@@ -31,6 +31,11 @@ arbitrary-channel action) non-issues by default. Keep them intact when you custo
 
 ## 2. Intent-dependent decisions (decide, then document in your review request)
 
+> **One-round-trip tip:** write your review request with per-branch statements — e.g.
+> "caller allowlist at `main.go:<line>`", "Socket Mode", "deterministic completion hook",
+> "tokens in Doppler" — instead of leaving reviewers to ask. Complete, pre-answered
+> requests are routinely approved without a single follow-up question.
+
 ### 2.1 Caller scope — who may trigger the bot?
 
 The review question is **not** "is it limited to one person?" but "**is the actual
@@ -68,6 +73,10 @@ this example. For anything beyond a local experiment:
 
 - Store them in the approved secrets chain for your platform (e.g. Doppler → AWS Secrets
   Manager → external-secrets for K8s deployments). Never commit them or bake them into images.
+- **Coder workspaces:** if the bot runs on the Sendbird-managed Coder platform, hosting is
+  the ops AWS account — reviewers record this automatically, so you don't need to justify
+  hosting separately. The secrets rules here still apply: a Coder workspace filesystem is
+  not a secrets store.
 - `CODER_SESSION_TOKEN` must come from a **dedicated service account**, not your personal
   Coder account, and with the narrowest role available.
 - Declare each credential in the review request: owner (personal vs service account),
@@ -75,11 +84,21 @@ this example. For anything beyond a local experiment:
 
 ### 2.4 Model blast radius — what can a successful injection do?
 
-The LLM here has write-capable Slack tools, so review will ask: *if a prompt injection
-succeeds, what is the worst case?* With this fork's defaults the answer is "post/edit/react
-in the invoking channel only." If you add tools (files, external APIs, workspace exec),
-re-answer that question and add a human-approval gate for anything that mutates systems
-or sends data outside the invoking thread.
+**First decision: who sends the outbound message?**
+
+- **(a) Deterministic completion hook** — fixed code at the end of the job sends it;
+  recipient and template are hardcoded and no model decides when/where/what to send.
+  Injection blast radius ≈ 0. State "deterministic completion hook" in your review
+  request; the rest of this section doesn't apply to you.
+- **(b) Model-invoked tool** (what this example does) — the LLM calls a Slack send tool.
+  Then the send target **must be pinned in code** (this fork's `verifyToolCall`); a
+  model-chosen, unpinned target is a review blocker.
+
+For branch (b), review will ask: *if a prompt injection succeeds, what is the worst case?*
+With this fork's defaults the answer is "post/edit/react in the invoking channel only."
+If you add tools (files, external APIs, workspace exec), re-answer that question and add
+a human-approval gate for anything that mutates systems or sends data outside the
+invoking channel.
 
 ### 2.5 Installation gating
 
